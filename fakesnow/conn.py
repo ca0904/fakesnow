@@ -6,6 +6,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any
 
+import pyarrow
 import snowflake.connector
 import sqlglot
 from duckdb import DuckDBPyConnection
@@ -29,6 +30,7 @@ class FakeSnowflakeConnection:
         create_schema: bool = True,
         db_path: str | os.PathLike | None = None,
         nop_regexes: list[str] | None = None,
+        sfqid_results: dict[str, pyarrow.Table] | None = None,
         *args: Any,
         **kwargs: Any,
     ):
@@ -51,6 +53,7 @@ class FakeSnowflakeConnection:
         self.nop_regexes = nop_regexes
         self._paramstyle = kwargs.get("paramstyle", snowflake.connector.paramstyle)
         self.variables = Variables()
+        self.sfqid_results = sfqid_results if sfqid_results is not None else {}
 
         # create database if needed
         if (

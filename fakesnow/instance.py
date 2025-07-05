@@ -4,6 +4,7 @@ import os
 from typing import Any
 
 import duckdb
+import pyarrow
 
 import fakesnow.fakes as fakes
 from fakesnow import info_schema
@@ -25,6 +26,7 @@ class FakeSnow:
         self.db_path = db_path
         self.nop_regexes = nop_regexes
 
+        self.sfqid_results: dict[str, pyarrow.Table] = {}
         self.duck_conn = duckdb.connect(database=":memory:")
 
         # create a "global" database for storing objects which span databases.
@@ -52,5 +54,6 @@ class FakeSnow:
             create_schema=self.create_schema_on_connect,
             db_path=self.db_path,
             nop_regexes=self.nop_regexes,
+            sfqid_results=self.sfqid_results,
             **kwargs,
         )

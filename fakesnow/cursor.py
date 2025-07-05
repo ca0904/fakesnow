@@ -456,6 +456,9 @@ class FakeSnowflakeCursor:
         self._rowcount = affected_count or self._arrow_table.num_rows
         self._sfqid = str(uuid.uuid4())
 
+        if self._conn.sfqid_results is not None:
+            self._conn.sfqid_results[self._sfqid] = self._arrow_table
+
         self._last_sql = result_sql or sql
         self._last_params = None if result_sql else params
         self._last_transformed = transformed

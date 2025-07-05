@@ -430,3 +430,42 @@ def test_server_types(scur: snowflake.connector.cursor.SnowflakeCursor) -> None:
             2,
         )
     ]
+
+
+def test_server_async_query_with_retrieval(server: dict) -> None:
+    """Test asynchronous query execution and result retrieval using sfqid."""
+    with snowflake.connector.connect(**server, database="db", schema="sh") as conn, conn.cursor() as cur:
+        # Execute an async query with more complex data
+        cur.execute_async("select 42 as answer, 'hello world' as message")
+        async_sfqid = cur.sfqid
+
+        # Verify sfqid is generated
+        assert async_sfqid is not None
+        assert isinstance(async_sfqid, str)
+        assert len(async_sfqid) > 0
+
+        # Try to retrieve results from the async query
+        cur.get_results_from_sfqid(async_sfqid)
+        async_results = cur.fetchall()
+        assert async_results == [(42, "hello world")]
+
+        # Test that we can also execute regular queries and retrieve their results
+        cur.execute("select 'regular query' as type")
+        regular_sfqid = cur.sfqid
+        assert regular_sfqid is not None
+        assert regular_sfqid != async_sfqid
+
+        # Test retrieving results from regular query sfqid
+        cur.get_results_from_sfqid(regular_sfqid)
+        regular_results = cur.fetchall()
+        assert regular_results == [("regular query",)]
+
+
+def test_server_monitoring_endpoint_error(server: dict) -> None:
+    """Test error response from monitoring query endpoint for non-existent query IDs."""
+    fake_sfqid = "00000000-0000-0000-0000-000000000000"
+
+    with snowflake.connector.connect(**server, database="db", schema="sh") as conn, conn.cursor() as cur:
+        with pytest.raises(snowflake.connector.errors.InterfaceError) as excinfo:
+            cur.get_results_from_sfqid(fake_sfqid)
+        assert excinfo.value.errno == 250003

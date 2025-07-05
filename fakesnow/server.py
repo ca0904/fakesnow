@@ -3,11 +3,13 @@ from __future__ import annotations
 import gzip
 import json
 import logging
+import re
 import secrets
 from base64 import b64encode
 from dataclasses import dataclass
 from typing import Any
 
+import pyarrow as pa
 import snowflake.connector.errors
 from sqlglot import parse_one
 from starlette.applications import Starlette
@@ -37,6 +39,31 @@ class ServerError(Exception):
     status_code: int
     code: str
     message: str
+
+
+def arrow_schema_to_describe_format(schema: pa.Schema) -> list[tuple[str, str, None, None, None, None]]:
+    """Convert PyArrow schema to DuckDB describe format."""
+    describe_results = []
+    for field in schema:
+        # Convert Arrow type to DuckDB type string
+        if field.type == "string":
+            column_type = "VARCHAR"
+        elif str(field.type).startswith("int"):
+            column_type = "BIGINT"
+        elif str(field.type).startswith("float") or str(field.type).startswith("double"):
+            column_type = "DOUBLE"
+        elif field.type == "bool":
+            column_type = "BOOLEAN"
+        elif str(field.type).startswith("timestamp"):
+            column_type = "TIMESTAMP"
+        elif str(field.type).startswith("decimal"):
+            column_type = "DECIMAL"
+        else:
+            column_type = "VARCHAR"  # Default fallback
+
+        # Format: (column_name, column_type, null, key, default, extra)
+        describe_results.append((field.name, column_type, None, None, None, None))
+    return describe_results
 
 
 async def login_request(request: Request) -> JSONResponse:
@@ -95,6 +122,51 @@ async def query_request(request: Request) -> JSONResponse:
             params = None
 
         expr = parse_one(sql_text, read="snowflake")
+
+        result_scan_match = re.match(
+            r"select \* from table\(result_scan\('([^']+)'\)\)", sql_text.strip(), re.IGNORECASE
+        )
+        if result_scan_match:
+            scan_sfqid = result_scan_match.group(1)
+            arrow_table = conn.sfqid_results.get(scan_sfqid)
+            if arrow_table:
+                describe_results = arrow_schema_to_describe_format(arrow_table.schema)
+                rowtype = describe_as_rowtype(describe_results)
+
+                # Convert to Snowflake format and encode
+                sf_table = to_sf(arrow_table, rowtype)
+                batch_bytes = to_ipc(sf_table)
+                rowset_b64 = b64encode(batch_bytes).decode("utf-8")
+
+                return JSONResponse(
+                    {
+                        "data": {
+                            "parameters": [
+                                {"name": "TIMEZONE", "value": "Etc/UTC"},
+                            ],
+                            "rowtype": rowtype,
+                            "rowsetBase64": rowset_b64,
+                            "total": arrow_table.num_rows,
+                            "queryId": scan_sfqid,
+                            "queryResultFormat": "arrow",
+                            "finalDatabaseName": conn.database,
+                            "finalSchemaName": conn.schema,
+                        },
+                        "success": True,
+                    }
+                )
+            else:
+                return JSONResponse(
+                    {
+                        "data": {
+                            "errorCode": "002003",
+                            "sqlState": "02000",
+                        },
+                        "code": "002003",
+                        "message": f"No result found for sfqid {scan_sfqid}",
+                        "success": False,
+                    }
+                )
 
         try:
             # only a single sql statement is sent at a time by the python snowflake connector
@@ -198,6 +270,49 @@ async def session(request: Request) -> JSONResponse:
         )
 
 
+def monitoring_query(request: Request) -> JSONResponse:
+    try:
+        token = to_token(request)
+        conn = to_conn(token)
+
+        sfqid = request.path_params["sfqid"]
+        if not (arrow_table := conn.sfqid_results.get(sfqid)):
+            raise ServerError(status_code=404, code="390105", message=f"Query with SFQID {sfqid} not found.")
+
+        describe_results = arrow_schema_to_describe_format(arrow_table.schema)
+        rowtype = describe_as_rowtype(describe_results)
+
+        # Convert to Snowflake format and encode
+        sf_table = to_sf(arrow_table, rowtype)
+        batch_bytes = to_ipc(sf_table)
+        rowset_b64 = b64encode(batch_bytes).decode("utf-8")
+
+        return JSONResponse(
+            {
+                "data": {
+                    "parameters": [
+                        {"name": "TIMEZONE", "value": "Etc/UTC"},
+                    ],
+                    "queries": [{"status": "SUCCESS", "sfqid": sfqid}],
+                    "rowtype": rowtype,
+                    "rowsetBase64": rowset_b64,
+                    "total": arrow_table.num_rows,
+                    "queryId": sfqid,
+                    "queryResultFormat": "arrow",
+                    "finalDatabaseName": conn.database,
+                    "finalSchemaName": conn.schema,
+                },
+                "success": True,
+            }
+        )
+
+    except ServerError as e:
+        return JSONResponse(
+            {"data": None, "code": e.code, "message": e.message, "success": False, "headers": None},
+            status_code=e.status_code,
+        )
+
+
 routes = [
     Route(
         "/session/v1/login-request",
@@ -211,6 +326,7 @@ routes = [
         methods=["POST"],
     ),
     Route("/queries/v1/abort-request", lambda _: JSONResponse({"success": True}), methods=["POST"]),
+    Route("/monitoring/queries/{sfqid}", monitoring_query, methods=["GET"]),
 ]
 
 app = Starlette(debug=True, routes=routes)
